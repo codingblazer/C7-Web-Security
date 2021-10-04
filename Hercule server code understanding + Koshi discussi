@@ -1,0 +1,228 @@
+Hercule server code understanding + Koshi discussion on how he simplified them
+
+Discussion with koshi on Avatax, Identity and AUI in general =>
+
+Avatax API => publically available by searching on google => for authenticating, they use identity's Basic auth header => 
+authorization header => 'Basic <user name password in base64 encoding>' => But this has to be used on Https as encoded password username can be decoded back by intercepting the call on normal http.
+
+Avalara Identity API => It has API /connect/token which takes the username password and gives back the access token. 
+
+Now in our web app when we do login => it goes to https://identity.avalara.com/Account/Login?ReturnUrl=%2Fconnect%2Fauthorize%2Fcallback%3Fresponse_type%3Dcode%26client_id%3Daui-identity-prd%26redirect_uri%3Dhttps%253A%252F%252Ftaxcode.avatax.avalara.com%252Fauth%252Fcallback%26scope%3Dopenid%2520profile%2520email%2520offline_access%2520avatax%2520avatax_api%26state%3D20200121%253DAyqbVTTTUmoUamWZV93qvQ%253AFY6z2wJ6ryP7mclA9C-trqtJkY9v4Vr0nxjKZtTBsD0KZRzFqJu8Zuj9v8iOeIWTN2xU-5On-cLvrHJIMdPGig
+
+=> this is taking to avalara identity which is like 3rd part fb google login page asking for username password => In this page we enter password and username and do login and once the login is done, this identity page goes to return url we have mentioned in above identity url itself => auth/callback?code=<this is called Oauth open id code> => This endpoint in present on hercule server which gets the auth code above and sends it again to identity to extract information like access token from this auth code using aui. 
+
+All avalara apps like avatax, cross border accepts this access token. 
+--------------------------------------
+Avatax API => If you go to swagger of this, it accepts 2 types of auth => 
+
+1. You can send a header like -H Authorization: Bearer <access token> => this is called bearer token authentication
+2. Basic header authenticatiopn => -H Authorization: Basic <email password in base 64> => this is usually done by redirecting to identity page where you enter username password and this header is added. 
+------------------------------------------
+Avalara identity => We get a generic AI client from them which aui uses to talk to identity. This client we registered with AI team and also told them what all avalara apps it can talk to i.e. scopes like avatax app etc.  
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Discussion before changes were done on why this is needed and how we will do it ?
+
+Currently hercule server has both web app (which serves UI routes) and the APIs mixed (which serves both UI and external parties like CUP, turbo). The issue with these are:
+
+1. Can't scale up in future => If you are creating multiple nodes for lode balancer => you can't deploy 10 instances of APIs and 2 instances of web app => You have to deploy 10 instances and all having web app and APIs. 
+
+2. Currently any changes in UI routes results in reedeployment and maybe changes in server routes as well since both are mixed and changes in contract with CUP turbo. What we want is API to be separate which is independent of UI routes and CUP turbo UI all can follow the contract that this API specifies with proper documentation like there is for Avatax APIs which multiple applications make use of.
+
+Example why this is so complex => Currently if you do a curl on any taxability API => The response has some web browser related headers as well because of mix up of web APIs and server APIs. Also let say you are not sending authorization headers to this API => this taxability API might return redirect response for OAuth thinking call is from web browser => For CUP or turbo this type of response should not be there but there should be standard response. For browser case, web APIs should do redirect kind of thing on top of this response.
+
+Another example is that many times API is returning web page of 404 not found even to CUP users though that should only be sent to web app. 
+
+3. Now we know that hercule server APIs also calls the hercule-bulk or hercule-api further. Now if any error occurs on bulk side or the hercule-api side, we have standard error and response structure which can be shared like avatax API with anyone and hercule server also passes that error as it is to the caller. But let say the error happens on the hercule server side => There is no standard error structure or response format due to mix up with web app.  
+------------------------------------------
+Changes proposed => Based on example above, it gives some sense on how this should be architectured => 
+
+3 parts => 
+1. web app with authentication based on basic auth i.e. email password and auth code 
+2. hercule server APIs which will have authentication based on bearer token => used by both web app and CUP, turbo with standard structure
+3. Bulk or hercule-api which will bee called by hercule-server APIs
+
+Web App flow => You login on the UI side and credentials are sent to AI and returnUrl will have /auth/callback?code=xyz => this code is called auth code which is returned by avalara identity on yuour authentication. Now when this returnUrl is hit, we will have this return url route on hercule server web APIs which will take auth code from the route and use aui package to authenticate. In this case, authentication is done by aui itself and we dont have to worry about anything. After authentication aui returns back a access token in the req object along with other session management things set inside a cookie object like refresh token, user info, etc in the cookie object.
+Using this access token we can call the avatax API which needs the access token. Also we can call the server APIs which this web app needs for example taxability data => The hercule server API might be calling bulk etc on the backend. Now when the response comes from server APIs, we attach the response as it is with the cookies etc that are generated and return back to web browser which will have session related things like cookies. Next time browser sends a request, these cookies like session id etc will be sent again and aui will validate them and user will be authorised to make call without logging in back again. 
+Access token is set by aui inside req.user.accessToken and you can also see in web browser in /profile endpoint. 
+In this flow, since cookie is used for handling and done by aui as a blackbox, there aree no authorisation header in the request that comes whether at login time or later. Thus if authorisation headers are not present we can say it is request from web app.
+
+
+
+CUP/Turbo flow => These apps will call the server APIs directly but they need the bearer token aka access token for that. So CUP etc will have auth code kind of flow on their end to login the user and generate the access token and then they will send request here with access token in the authorisation header as bearer token. We have a token validator code on our server APIs side which validates the access token and then only return  the response for the calls made by the CUP turbo. If you look in web app flow also, there also access token was added by aui inside the req.user.accesstoken object which is again validated by this server API side. 
+
+
+2nd work to do => Currently routeInfo does not have the verbs => /api/tree => this route is in the unauthenticated routes => if someone adds a delete of this endpoint in the future, that will also be unauthenticated and anybody could delete the tree => This should be described at different verb levels like GET, PUT, DELETE etc
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Some more discussion and findings on aui cookie and session management =>
+
+If you go to the taxode.avatax.com website, then you can open chrome dev tools and open application tab => cookies => under taxcode.avatax => Search for aui and you will see 2 cookies => aui-id-prod and aui-at => By the name you can see that aui-id-prod => cookie is created in different way for different env so that if logged in user info in diff env don't get mixed up. Because all browser cookies are available to all websites and when qa is opened, aui-id-prod is also there and it wont use this and use the one for its own env only this way.
+
+In chrome dev tool if you choose the option in bottom => decode URL, you can see the encrypted value => How to decode this ? => When koshi read the aui package code there is a file cookie.mjs which aui uses to decrypt this cookie or encrypt this => they excryption is done using a encryption which is present in secrets.json file => 
+
+{
+  "identity": {
+    "cookie": {
+      "encryption": {
+        "keys": {
+          "20200120": "yss9lRfqLUOqOXSOXwWTvYKiRjPF4gcy"
+        }
+      }
+    },
+    "clients": {
+      "awsfqa": {
+        "clientSecret": "secret"
+      },
+      "hercule-midgard-app": {
+        "clientSecret": "Auk26SWLfxrkUGLPKh5HNc7v4maAkUs"
+      }
+    }
+  }
+}
+
+"20200120": "yss9lRfqLUOqOXSOXwWTvYKiRjPF4gcy" => the key here is also present in code of cookie.mjs and is actually some date if you see closely. => cookie.mjs gets the value of this date from secrets.json and use this "yss9lRfqLUOqOXSOXwWTvYKiRjPF4gcy" to encrypt or decrypt => You can actually run it yourself => Beware to use the secret of prod as it is differnt for diff environments => you can get it from s3 => https://s3.console.aws.amazon.com/s3/object/com.avalara.hercule.prod.private?region=us-east-1&prefix=secrets.json
+-----code start------
+import crypto from 'crypto';
+const ALGORITHM = 'aes256';
+const checkIfHasSerial = /^[0-9]{1,10}=/;
+const checkIfHex = /^[0-9a-f]+:[0-9a-f]/;
+function decrypt(cipherKey, serialedEncryptedText){
+    try {
+      console.log("start")
+      if (!checkIfHasSerial.test(serialedEncryptedText)) {
+        return undefined;
+      }
+      const serial = serialedEncryptedText.substr(0, serialedEncryptedText.indexOf('='));
+      const encryptedText = serialedEncryptedText.substr(serial.length + 1);
+      console.log(encryptedText)
+      const encoding = checkIfHex.test(encryptedText) ? 'hex' : 'base64';
+      console.log(encoding.toString())
+      const [iv, cipherText] = encryptedText
+        .split(':')
+        .map(value => Buffer.from(value, encoding));
+      console.log(iv.toString())
+      console.log(cipherText)
+      const decipher = crypto.createDecipheriv(ALGORITHM, cipherKey, iv);
+      return decipher.update(cipherText, encoding, 'utf8') + decipher.final('utf8');
+    } catch (err) {
+      console.log({
+        message: 'AUI was unable to decrypt an encrypted string due to an unexpected error.',
+        error: { ...err, message: err.message, stackTrace: err.stack },
+        serialedEncryptedText
+      });
+      // Most likely cause: cookie was too old, past the window of serial number rotation. But why was it
+      // even presented beyond the cookie expiration date which should be harmonious with the rotation window?
+      return undefined;
+    }
+}
+
+console.log(decrypt('7NKDpxUPShzM9v+gIb5iNZBKIKtK1Z1H', '20200121=PoUc3sy_iEscDOSnBeMiCg:SyDoF5V6yIjgiH6qWwjJZL5fS-C9IosAWNHTop_nR69vIQUoTdWIaPll9eoQWgweM5T3sTrCMwLQPHXLfW0fUCwftqw2bvKTJhWpPKn8Hxz4QzZTlQ8B6MgNWdMkCT7uYwyLQdx_PzDm9jsH4cRglkk2yoSJrmyczfB7fsY78ttsoWzYNW24Ah3QnxFxeff_w6f7qbmHjKlFk34bGcKXo53SJkMJ5MW2h6c18QdWIa2c2pTrjRqL840tb2NB_WBOetporkpORgaZ0YwykWbiAGxiO5YwV_wu3iO8ySnRPI7_uf9eIm_n6is7imUYTRWEtSa_8qPIdx8OMSUTXklh9HA6tTCQ5b18tKhgE2HkYzteLOiaOOYX4lxLe2myk75oczkNsP27c7PgDYSTRUsY3jVTFMXf9tsw2jV1P5KjbLrmJW-liYzwbP6NeqRalvfsBD_H67sDfT8bEC1krqkxPlNNAPCVqxiv1-uTZ6v9J0S9Rhz8zrEp04O-Xw9o9I0GWjf-lD4END4W6HYaXDnzlMFkeA4c6KXzX-UChV_Q0HWJD4Di6cczn0D_msKPfTl2E3LbImyyHerjYZg0m8d666wC70kLZaCXh2uXo3STr0n4586k5sryA_bbnLo6hQ6DH4Q5if1qiFJaZ-CQV019HKGMD-fik-ikD4d1eRdyrhTgJA8VoTwtuLSwK3i11ks_UL6UXIFtNZKXVeBgQkRt-X42WaBFrnKXTphEUal6TR9hRimxdw4Ywy08x7K9dygmTWrux6JHq_GYDvIH5JEVMBK4BIgA8IBMpzQHK65vnFQ0HonW7tliYPMjVeM7rYsYWnv2NXwyknX7rJwRFR8adCJaKMbbW-DbqOeGaw6PDbzpmK6yd5yDdi6TAEH-ZqfUP1h9cGzemCHIG0u5CutSjHwkgyWUHgLEM4RKJLYR5Sfe59zq1jyHJOixKqpjvHu8_U-RzowlSGqTNfzW3jtmp0AhaQas9bu4JysvKXfgvNsxEmDcntyuhk5ZHsT6ucKpL5Oo64psHJrCCmYPqCVBAIWn0mGdD9e9nybAOQKrCPBFTPOhjEF4nIdeGwdxJueELUloeqheIQwZwooEMmm4Qk69pv236mLD6O1LbWeJXG8cDGs0c89NQ_kaqDIOcf_HYPA_PECNH6_YS9JVmRHq-zzTWsGCHOCgEUbk0F_2Mr92h1JjNpCiCduIsEySmFt6boBZVBn1pfXTXB4YsgS-nHlvWTRMgCdbA1Uka7goYRw5sgQ1OI3JMPL472LHpCZZqtTuYloqe4D7vGXZZ2KovseMguxwtIAIJ3aMFxedfe_jvpxFDOx_ltceV851e1XkHZFRsQbG6oCVCpGsBneQmQBsmJVZBudG2YgcYFinF-ewdmJ9-RnDHgF2vDbchlSHc_JU-78SL2yXi1OPzfrFaz-V8hkTzRCgueWLSD3fi3bJXp5uuajUDMhSZFgZSKUBB6VzhSZ9S4MLyq-PttNGhYgOxPT7CtRfVKkuPX2JJqI1peskzjUXP0jNmb1SHRyw8AERtnaWzBZlvYL0un7bw1s5XVx8A_eXSNeOYoqeOahXxcF-bS-G8F88Bxiy8DnerKq8mnj9FD08UDhPFA8VmCVkUonPOXK7oBMhdxAtHHvtRpRaR5oP3VNaCJBGZZMo05t36zQoDe5SN4ipHYPOCt6dXFfG3H1ROTRmsI5lVSp88qaYrtK3fLZSvqxhjrID3sl5BMOtvEHA_LTR3yApgHij_r91PNQ8LOUvswX8JUQPUhWbl_I5CnICLtfkrv5IcluY7uw5AOe_IIk7KliYCwcixcGQfctGecxmssiQCxKdDlDid0yGdnMO5KE_XKeLOEN8RA4NDFrGH3njsuy3gugSPDGyhQPmJXRGb67lyvb8aHYzXEgrs7s44Z6Ela0mKW2Pbz-GLmHBZ-69GAgmEYaa0tgQk52hng2MEoPC_wkLFnJsf1KABgqEeOp-2Fy-UWxV7cDWGX_SRfAqkxhPAA5Hy-Bb7Q7sdYbrfSeKAzrqg6N8RoAQ7LMmmTSSlacyULDSLZxS-eTwBGfdcKsxUhXdbZ_Vnn1s5O8yGg33Dx1R2kdt0L9jCy0tnFKu8NmPP09glTbIfYnthytADgfLhg'))
+------code end------
+In last line we are doing console of => 
+console.log(decrypt(prodSecret, cookieVal))
+Remove the e: from the cookie value as per cookie.mjs code. Also copy the URL decoded cookie value which will show below checkmark of URL decode in chrome dev tool.
+
+Actual cookie => 
+
+e:20200121=PoUc3sy_iEscDOSnBeMiCg:SyDoF5V6yIjgiH6qWwjJZL5fS-C9IosAWNHTop_nR69vIQUoTdWIaPll9eoQWgweM5T3sTrCMwLQPHXLfW0fUCwftqw2bvKTJhWpPKn8Hxz4QzZTlQ8B6MgNWdMkCT7uYwyLQdx_PzDm9jsH4cRglkk2yoSJrmyczfB7fsY78ttsoWzYNW24Ah3QnxFxeff_w6f7qbmHjKlFk34bGcKXo53SJkMJ5MW2h6c18QdWIa2c2pTrjRqL840tb2NB_WBOetporkpORgaZ0YwykWbiAGxiO5YwV_wu3iO8ySnRPI7_uf9eIm_n6is7imUYTRWEtSa_8qPIdx8OMSUTXklh9HA6tTCQ5b18tKhgE2HkYzteLOiaOOYX4lxLe2myk75oczkNsP27c7PgDYSTRUsY3jVTFMXf9tsw2jV1P5KjbLrmJW-liYzwbP6NeqRalvfsBD_H67sDfT8bEC1krqkxPlNNAPCVqxiv1-uTZ6v9J0S9Rhz8zrEp04O-Xw9o9I0GWjf-lD4END4W6HYaXDnzlMFkeA4c6KXzX-UChV_Q0HWJD4Di6cczn0D_msKPfTl2E3LbImyyHerjYZg0m8d666wC70kLZaCXh2uXo3STr0n4586k5sryA_bbnLo6hQ6DH4Q5if1qiFJaZ-CQV019HKGMD-fik-ikD4d1eRdyrhTgJA8VoTwtuLSwK3i11ks_UL6UXIFtNZKXVeBgQkRt-X42WaBFrnKXTphEUal6TR9hRimxdw4Ywy08x7K9dygmTWrux6JHq_GYDvIH5JEVMBK4BIgA8IBMpzQHK65vnFQ0HonW7tliYPMjVeM7rYsYWnv2NXwyknX7rJwRFR8adCJaKMbbW-DbqOeGaw6PDbzpmK6yd5yDdi6TAEH-ZqfUP1h9cGzemCHIG0u5CutSjHwkgyWUHgLEM4RKJLYR5Sfe59zq1jyHJOixKqpjvHu8_U-RzowlSGqTNfzW3jtmp0AhaQas9bu4JysvKXfgvNsxEmDcntyuhk5ZHsT6ucKpL5Oo64psHJrCCmYPqCVBAIWn0mGdD9e9nybAOQKrCPBFTPOhjEF4nIdeGwdxJueELUloeqheIQwZwooEMmm4Qk69pv236mLD6O1LbWeJXG8cDGs0c89NQ_kaqDIOcf_HYPA_PECNH6_YS9JVmRHq-zzTWsGCHOCgEUbk0F_2Mr92h1JjNpCiCduIsEySmFt6boBZVBn1pfXTXB4YsgS-nHlvWTRMgCdbA1Uka7goYRw5sgQ1OI3JMPL472LHpCZZqtTuYloqe4D7vGXZZ2KovseMguxwtIAIJ3aMFxedfe_jvpxFDOx_ltceV851e1XkHZFRsQbG6oCVCpGsBneQmQBsmJVZBudG2YgcYFinF-ewdmJ9-RnDHgF2vDbchlSHc_JU-78SL2yXi1OPzfrFaz-V8hkTzRCgueWLSD3fi3bJXp5uuajUDMhSZFgZSKUBB6VzhSZ9S4MLyq-PttNGhYgOxPT7CtRfVKkuPX2JJqI1peskzjUXP0jNmb1SHRyw8AERtnaWzBZlvYL0un7bw1s5XVx8A_eXSNeOYoqeOahXxcF-bS-G8F88Bxiy8DnerKq8mnj9FD08UDhPFA8VmCVkUonPOXK7oBMhdxAtHHvtRpRaR5oP3VNaCJBGZZMo05t36zQoDe5SN4ipHYPOCt6dXFfG3H1ROTRmsI5lVSp88qaYrtK3fLZSvqxhjrID3sl5BMOtvEHA_LTR3yApgHij_r91PNQ8LOUvswX8JUQPUhWbl_I5CnICLtfkrv5IcluY7uw5AOe_IIk7KliYCwcixcGQfctGecxmssiQCxKdDlDid0yGdnMO5KE_XKeLOEN8RA4NDFrGH3njsuy3gugSPDGyhQPmJXRGb67lyvb8aHYzXEgrs7s44Z6Ela0mKW2Pbz-GLmHBZ-69GAgmEYaa0tgQk52hng2MEoPC_wkLFnJsf1KABgqEeOp-2Fy-UWxV7cDWGX_SRfAqkxhPAA5Hy-Bb7Q7sdYbrfSeKAzrqg6N8RoAQ7LMmmTSSlacyULDSLZxS-eTwBGfdcKsxUhXdbZ_Vnn1s5O8yGg33Dx1R2kdt0L9jCy0tnFKu8NmPP09glTbIfYnthytADgfLhg
+
+Created cookie.mjs file and pasted code start and end inside it and did node cookie.mjs and this will give you decrypted data which will have user related information => 
+
+{"d":{"isLoggedIn":true,"avataxAccountId":"1100076391","avataxUserId":"1089725","subjectId":"310304e0427b49bdb5207f6c97816f44","email":"sachin.aggarwal@avalara.com","familyName":"Aggarwal","givenName":"Sachin","name":"sachin.aggarwal@avalara.com","locale":"","cId":"aui-identity-prd","idpEnvName":"prod","scopes":["openid","profile","email","offline_access","avatax","avatax_api"],"accessToken":"d5cd442659056c1758a104e74b22db014e3fb9036be48ebcc4c1f599c49c3e40","accessTokenExpireTime":"2021-06-06T14:02:25.109Z","refreshToken":"da251f46e129468a36f03c4a1f1238b08d865f308733e0f635257346f449f518","miniIdToken":["{\"alg\":\"RS256\",\"kid\":\"3DFABE7651C33E2116E09238E694B25624D86DFCRS256\",\"typ\":\"JWT\",\"x5t\":\"Pfq-dlHDPiEW4JI45pSyViTYbfw\"}","{\"nbf\":1622984545,\"exp\":1622984845,\"iss\":\"https://identity.avalara.com\",\"aud\":\"aui-identity-prd\",\"iat\":1622984545,\"at_hash\":\"vWD3644kR5txzU8me6ftog\",\"s_hash\":\"bD7ybKF4OUyPJupcJAXTEg\",\"sid\":\"B8924454E3B79EE7381F29B54974C32C\",\"sub\":\"310304e0427b49bdb5207f6c97816f44\",\"auth_time\":1622984544,\"idp\":\"AvalaraIdentity\",\"amr\":[\"external\"]}","Rikm8y9XNfNyXESXFEs18jRRFKBo__Bren1VDpSPCqE_0BxHpVWWcAXd-BXUEhbyAUURLN95v0pYFLgmN8gHgftGkv9kzg7Cw_RM3ap5ynFWgUhO6QLl-n1IrR1YYr0D9JVUF9He8ZzdiWw0bIKBqASrSBwnZppPTSYsCYzisN4TkmqPq7u2YMLsNdOoTxOTl-9CRqWOyjWmWYhdHfe1wDJo4AAb5REvAPIlWK9uBwyPG7YYzQqq2ZcM8gt5LBL3vzba1Lw0LdE6rMEtjqG9lL74b08RsJtpeV6nWMp6BzI87Qgro1dpY_8X4301DCwrXtQOGa8Om9fKcN42_UEwpw"],"identityTime":"2021-06-06T13:02:25.109Z","userUpdateTime":"2021-06-06T13:02:25.109Z"},"s":"95d82f77c558485e9ce745eac7"}
+
+Even the refresh token is available here which is very important since having access token can exploit only till it expires but refresh token once come in somebody's hand, they can use it to get access tokens for entire lifetime
+
+Note that the date key secret we used from secrets.json is applicable for all avalara apps i.e. it can be used to decrypt any avalara app cookie like CUP because it is not at application level but at aui level which all applications uses.  
+------------------------------------------------------------------------
+The other cookie value we see is this one => 
+
+aui-at cookie => this has the actual access token value and is not encrypted at all also. 
+-------------------------------------------------------------
+Cookie protections =>
+
+If you see any cookie it has additional details like path etc =>
+
+path => cookie are stored at which level
+domain => .avalara.com => Normally all cookies inside your broswser are passed onto all websites you go to => But here for this cookie it specified that if domain is avalara.com then only pass this cookie to any other website otherwise not. This is why when we login to CUP and go back to taxcode website of ours, cookiee is shared because of same domain and we get automatically logged in 
+
+http only and secure => this makes sure that if any cross side script comes, it cant read that cookie. Also secure makes sure that if any avalara domain comes with http dont give cookie to that because if we pass to it, cookie can sniffed in between because this is not https. 
+----------------------------------------------------
+Supporting TSA TSU using cookie management => 
+
+API level => since authenticatin happens by us only at this level by using the access token => here earlier we used to get the user info ourself from AI using the aui client and attach that to req.user and cache the user details by user id as well but now after supporting TSA, user who is sending any request can be of TSA user and thus switcher user info needs to be maintained as well by us (we need to maintain user info with some requests as they required calls to avatax)=> Koshi made changes to store both access tokens in req, also to cache not just user info but also customerAvataxAccountId in case it exists (in case request is from TSA user) in the cache and response object. 
+
+UI level => Somehow we need to store the context of the switched user on the session cookie along with original user info. We tried to see how CUP is doing that for TSA user in prod but we dont have TSA account in prod and couldnt see if TSA user info are stored in same aui-id-prod cookie or separate cookie is created for that. We tried going to lower env like sbx and qa since we have  TSA accoutn for them and we found it is not even having aui-id-sbx type cookies there but it has some session id type cookie => a different kind of mechanism is used in sbx and qa and thus we couldn't know how to store this additional info of TSA user.  
+
+Why we need to maintain the user info or even TSA user info inside the cookie ?
+Actually access token can be copied by anyone but cookie is encrypted by a secret date key which is know to server only and nobody can change that. So even if someone copies my access token and try to make request on my behalf to the web app APIs, we on web app side check if cookie are present and we decode that cookie and see if user is actually same as user told by access token and this ensures that user is correct.
+
+How we are thinkng of implementing this ? 
+
+We will store additional cookie using passport.js called aui-context which will store TSA user specific details. We dont want to add it to existing aui-id-prod cookie because that cookie is common to all avalara apps and might mess up things with other apps if we modify that cookie. Also this cookie we are creating needs to be encrypted like aui is encrypting aui-id-prod in cookie.mjs => You have a task to also see if the date secret key can be somehow accessed inside the application code for doing this encryption of our own cookie. 
+
+
+
+
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Things after koshi had made these changes => Roles, Separation of UI and API
+
+
+In server index => we have now separated the UI routes and the API routes => basically the web app routes and the server API routes. 
+If you see router-ui , it has routerConfig which is constructed by moving earlier routerconfig that we used to have. Earlier we had routerconfig for both ui and api separately but this one inside ui folderr will have only ui routes =>  In index server  we are calling router-ui routes to be set up. If you look at the routercinfig here, you will see roles being attached now => 
+
+It has unauthenticated and authenticated sections resp and in unauthenticated there are roles like => 
+
+  "authenticated" : [
+    { "pathPrefix": "/classification/:accountId/:companyId",  "roles" : ["ClassificationAdmin"] },
+    { "pathPrefix": "/classification",  "roles" : ["ClassificationAdmin"] },
+    { "pathPrefix": "/taxability",  "roles" : ["TaxabilityUser"] },
+    { "pathPrefix": "/taxability/:companyId",  "roles" : ["TaxabilityUser"] }
+  ]
+
+  We are in web APIs checking the role of the users => if the user has role specified only then he can open UI route. Note that order matters a lot here => try putting more specific route endpoint above because it is possible that taxability is available to taxability User and by this convention taxability avatax also becomes available to them. But if you want only taxabulity admin to see taxability avatax, add this condition before taxability condition since this is more specific one. 
+
+  Roles are assigned based on factors like email (internal or external user needed for taxability), feature allowed to the users (from admin db we get the features allowed to the user set in user object also). Multiple roles can be specified for a route which are all allowed. 
+
+  From now on this role only will be passed in window.user object on frontedn and thus UI which used to earlier check whether to show feature or not based on read/write value of feature and now just forget about features and use this role to show/hide a feature. 
+
+  ------------------------
+  In index server next step is setting userDetails => We get user details from the avalatax API and dont want to call it everytime for every request and thats why we cache user details by user id. Now unlike earlier we will have TSA users as well which will have user info of switched account as well like customerAvtaxAccountId etc that we will maintain in cache. But userId will be parent TSA superadmin account. So if TSA user id is 1 and it swiched to account 2 => cache is containing 1 is key => user data of 1 and additional TSA data of 2. But let say user come next time switched to user 3 => we dont want it to use cache because it contains some part of user 2 and not selected user 3 => we are also checking customerAvataxAccuntId and if they also match then only use cache or create fresh entry by callling the avatax api
+
+-------------------------------
+Next step is setupRoles => We are gettinf all the feature mapped to this account Id and features that are enabled for all like taxability to get all features applicable for this account Id => 
+After this we are using the role-features-mapping.json to assign a role based on this feature. The concept of read write with features that we used to have earlier has been removed now. 
+
+Using the role-features-mapping.json => for a feature applicable for account id => if any condition is satisfied, that role is added to list of roles => muliple roles are assigned to the account Id. In future email based condition will be also added to add roles. 
+
+Once these roles are generated, more low level roles are added => Guest role is added for all accounts which is least and something every user will have, For BulkAdmin...BulkUser which is lower one will be addeed => this is done using the roles.json file which has this information. 
+--------------------------------------
+Now API => router and APi 
+=> IsUserContexValid => checking here that the req.accountId and user accoint Id from cache matches 
+=> UI => now we have standardised things and any error returns 404 error page
+=-> API => standardised here as well and we are retuning standard error structure like bulk now
+---------------------------------------
+Schema changes => like told earlier, removed the read or write thing from features that we had earlier in admin db since now using json rules to determine the roles 
+--------------------------------------
+
+
+
+
+
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Questions for Koshi
+
+How are we protecting against CSRF 
+Since access token is available openly what if some other customer uses his access token to get details of some other user ? => on web app API side we are matching the cookie user to confirm if user is same but what if request is doen on the server API side where we are using the access token only and no cookue type thing is present 
+
+Read about sticky sessions which only store the cookie key and the actual values are stored on the server side => hash table on server side at load balancer level and how it 
+maintains it over load balanced instances is something you should understand 
+
+Read how single page application i.e. no dedicated backend like APIs or authentication is there and entire app is downloaded once on cloudfront => in this case Oauth happens on client side => read how this flow works out. 
+
+Verify notes above "Supporting TSA TSU using cookie management" is that what koshi meant ? 

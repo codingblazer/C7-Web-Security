@@ -1,0 +1,49 @@
+Identity and Access Management for Enterprise Video 
+
+Authentication => Proving who you are using username, password or MFA
+Authorization => After authenticated, what user has access to specific priviledges 
+
+1st model 
+
+Earlier, developers had to manage the user database because there were different user types + authentication for them and to make sure they get what they have access to, they had to manage the Roles and Rights logic within the application => Now code can be sure reused but every application having these was repetitve, and not cost productive. Also let say you want to make any changes or move to certificate based authentication => Have to make the changes everywhere. 
+
+Now developers who should work on business logic were incharge of user management and securing it. Then there are associated issues like, if user leaves, it has to be deleted everywhere, same for addition.  
+
+2nd model => Claim based access 
+
+There is a trust between all applications and a central server called Identity provider and the application will have much simpler logic now which just trusts and accepts the identity provided by the Identity provider (IdP).
+
+Application might still have user store, roles right info, etc but it will not have username/password authentication logic and its management. 
+
+Flow => User does authentication with identity provider using certificate or username password and identity provider gives an access token back which is identity or claim token used by user to access applications. 
+
+How is trust established between the identity provider and the applications => Depends on the standard you follow for this => 
+
+requires client id and secret 
+OR
+Certificates are exchanged between them through metadata files 
+
+
+The user store is still needed by the identity provider and the applications => usually enterprises take that out as Human resource management which is single source of truth. This can provision user into the identity provider and identity provider can provision user inside the application. 
+
+Realms => Google has their own identity provider and facebook has their own => these are 2 different relms => Now the trust between the 2 different realms i.e. If user is authenticated on one realm, realm 2 will allow the user => This trust between realms is made via federation. 
+
+For this trust, you have to discuss level of assurance => hwo much information user has provided in realm A => it can be as low as just email password and it can be as high as MFA. 
+
+=> Thats why 2 realms might share the way user was authenticated, if it is weak, you may disallow the user. 
+
+Home realm of user => How to know how user authenticated or which realm to connect to, to know the information of user => called the tenant discovery => For example, in office 365, it decides based on the email like gmail etc for tenant discovery to know which realm to connect to and uses that federation config to connect to realm.
+
+In such cases, application sends the user to its realm B for authentication. Once authenticated, the identity provider of realm B will give claim/access token which is usually signed with identity provider's certificate to know that claim is not tampered with. The claim or access token should follow any of the standards, the minimum of which says:
+
+Should have unique user identifier
+Access token signed with IDp certificate
+what authentication user used 
+user attributes => first name , email, group, roles, organization, etc
+
+CHAINED FEDERATION 
+
+User authenticates with one IDP and pass the claim or access token to next in the chain like SAML which's IDP terminates the previous claim after validating, does its IDP authentication and issues a new claim => the application trusts only the claim from the last IDP in the chain. 
+
+  
+

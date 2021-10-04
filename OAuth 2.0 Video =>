@@ -1,0 +1,16 @@
+OAuth 2.0 Video => 
+
+Zomato => login with google => this is called authorization and not authentication => this is Oauth = authorization
+
+It has 4 elements => 1) Client which is us 2) Resourced server => where information about user is stored which is on google server 3) Resource owner => which is google 4) Authorization server => which handles what happens when login with google is selected 
+
+Grant types => 4 => implicit, auth code, client credentials, resource owner password credentials. 
+
+How grant type works with example of auth code =>
+
+auth request is sent to authorization server => GET /o/oauth2/auth?redirect..... => it has these details in request: 
+response_type: code => it needs a code from google 
+client_id: client id of zomato as registered with google
+redirect_url: which url to redirect to after auth is done 
+scope: optional => email, profile => what all is needed 
+state: optional => maintained between client and auth server required to maintain state between these 2

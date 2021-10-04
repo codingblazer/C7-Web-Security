@@ -1,0 +1,15 @@
+Oauth 2.0 Docs Book => https://www.oauth.com/oauth2-servers/background/
+
+1. BACKGROUND
+
+Earlier if any user wanted to do some analysis of his tweets on twitter, he has share his twitter password with analytics 3rd party app which was definitely not safe and thus many companies created their own diff auth methods like fb used secrets that these 3rd party apps would get to do things, token based authentication by flickr, google has its own etc. 
+
+Open Id developers started initiative to create a standard, joined by google developers and then enterprises like twitter => OAuth 1 was created which was privately used by twitter and some others. 
+
+Oauth 2 started from Oauth 1.1 with a initiative to clear confusing parts from Oauth1 for the consumers and additional use cases like mobile applications where 1 was not safe.
+
+Conflict between enterprises and open source web => These conflicts shifted the focus of Oauth from being a standard to being a framework which loosely guides on how to build Oauth API without any strict requirement. Not neccesarily require tokens, token string size limit, any specific grant type. It just guides one to make decisions which mostly comes to current active implementations used by most => which are mostly similar. 
+
+We will look at those live implementations.
+
+2.

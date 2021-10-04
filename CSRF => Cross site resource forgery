@@ -1,0 +1,39 @@
+CSRF => Cross site resource forgery 
+
+Ankush is having facebook website logged in => logged in means that his password etc that he used to login got the session id which is now stored in the cookies in the browser and its related information like session expiry etc => Now when you send any request to Facebook, the request is combined with the cookie inside your browser and sent to Facebook server => using session id, server comes to know that ok, this user wants to create a new post and it creates it 
+
+Now let say I shared a website with Ankush on what app which he  opened on same browser, this site I only created which has a hidden auto run script which sends the same request to Facebook server like create post but with not good content => since browser has cookies and request is same, the Facebook server in normal case will allow the post to be submitted and Ankush will never know who did this 
+
+Website you can create using weebly.com instantly for free 
+
+Definition: Cross site request forgery is web security vulnerability that allows an attacker to induce users to perform actions that allows an attacker to partly circumvent the same origin policy, which is designed to prevent different websites from interfering with each other =>
+
+Same origin policy prevents above Ankush case as otherwise this would be so easy to do => What all same origin policy does that allow?
+
+Origin A => www.abc.com 
+Origin B => www.xyz.com
+
+Let say you have brought website B on website A, like we bring facebook login withing many websites or youtube videos on many websites => This is not allowed by same origin policy/browser's policy always unless xyz allows this website i.e. To avoid restrictions imposed by same origin policy, we use CORS to be able to get resources of child view website (iframe) intentionally => 
+
+abc.com => sends pre-flight request to xyz.com that I need your resources (this is done by browser automatically) => xyz.com gives back option Access-Control-Allow-Origin:www.abc.com => abc.com will then add this header to its request while making request to xyz.com server 
+
+If we intersect a request for an operation like new post on facebook or any other website, 2 things can happen =>
+
+1. You might see CSRF token in the request being sent => this CSRF token is used by server to know that request is coming from correct website and to prevent CSRF attack
+2. There is no CSRF token like we saw in Ankush example in which case, we can very simply create new post in ankush account 
+
+How to crack the first case => 
+
+1. Try removing CSRF token and send the request => server may be checking correctness of CSRF token when it is sent and not when it is not sent.
+2. Try changing the request method from POST to GET and vice versa...CSRF might be getting checked for certain methods.
+3. You can go to your account and use your CSRF token for Ankush account => Some servers may not be checking that CSRF token in the cookie is same as CSRF token being sent in the request itself. They just be taking CSRF token from request and checking if it is something they generated or not (irrespective of what user it was generated for).
+4. Some servers don't keep track of what CSRF token they issued i.e. they just check if CSRF token of cookie and request matches or not and CSRF token is in certain format they are generating in or not => You can try generating some CSRF token, maybe your account's token. Copy that to victims cookie (through your attacking website, but it is also possible that website does not allow cookie setting behavior where it will fail) and then use the same token in the request you are sending.
+5. Try adding <meta name="referrer" content="never"> tag in your fake website and it will omit the Referrer header from your request.
+6. Server sometimes check that domain name is facebook.com only => you can try putting facebook.com in your fake website url path or also buy subdomain like xyz.facebook.com so that host itself contains facebook.com.
+
+
+why is CORS needed ?
+role of CORS
+how is it implemented on server side and what if not implemented => will it still send options request or not and also
+what if I send request from not the browser 
+how to see preflight request in action 
